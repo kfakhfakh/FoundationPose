@@ -40,7 +40,10 @@ def run_neural_object_field(cfg, K, rgbs, depths, masks, cam_in_obs, debug=0, sa
   nerf.train()
 
   mesh = nerf.extract_mesh(isolevel=0,voxel_size=cfg['mesh_resolution'])
-  mesh = nerf.mesh_texture_from_train_images(mesh, rgbs_raw=rgbs, tex_res=1028)
+  try:
+    mesh = nerf.mesh_texture_from_train_images(mesh, rgbs_raw=rgbs, tex_res=1028)
+  except Exception as e:
+    logging.exception(f'mesh texturing failed, continue with untextured mesh: {e}')
   optimized_cvcam_in_obs,offset = get_optimized_poses_in_real_world(poses,nerf.models['pose_array'],cfg['sc_factor'],cfg['translation'])
   mesh = mesh_to_real_world(mesh, pose_offset=offset, translation=nerf.cfg['translation'], sc_factor=nerf.cfg['sc_factor'])
   return mesh
@@ -49,13 +52,20 @@ def run_neural_object_field(cfg, K, rgbs, depths, masks, cam_in_obs, debug=0, sa
 def run_one_ob(base_dir, cfg, use_refined_mask=False):
   save_dir = f'{base_dir}/nerf'
   os.system(f'rm -rf {save_dir} && mkdir -p {save_dir}')
-  with open(f'{base_dir}/select_frames.yml','r') as ff:
-    info = yaml.safe_load(ff)
+  select_frames_file = f'{base_dir}/select_frames.yml'
+  if os.path.exists(select_frames_file):
+    with open(select_frames_file,'r') as ff:
+      info = yaml.safe_load(ff)
+  else:
+    logging.warning(f'{select_frames_file} not found. Falling back to all files under rgb/.')
+    info = {}
   rgbs = []
   depths = []
   masks = []
   cam_in_obs = []
   color_files = sorted(glob.glob(f'{base_dir}/rgb/*.png'))
+  if len(color_files)==0:
+    raise FileNotFoundError(f'No RGB files found in {base_dir}/rgb')
   K = np.loadtxt(f'{base_dir}/K.txt')
   for i,color_file in enumerate(color_files):
     rgb = imageio.imread(color_file)
@@ -82,7 +92,14 @@ def run_ycbv():
 
   for ob_id in ob_ids:
     base_dir = f'{args.ref_view_dir}/ob_{ob_id:07d}'
-    mesh = run_one_ob(base_dir=base_dir, cfg=cfg)
+    if not os.path.exists(base_dir):
+      logging.warning(f'skip ob_{ob_id:07d}: {base_dir} does not exist')
+      continue
+    try:
+      mesh = run_one_ob(base_dir=base_dir, cfg=cfg)
+    except Exception as e:
+      logging.exception(f'skip ob_{ob_id:07d} due to error: {e}')
+      continue
     out_file = f'{base_dir}/model/model.obj'
     os.makedirs(os.path.dirname(out_file), exist_ok=True)
     mesh.export(out_file)
@@ -95,7 +112,14 @@ def run_linemod():
     cfg = yaml.safe_load(ff)
   for ob_id in ob_ids:
     base_dir = f'{args.ref_view_dir}/ob_{ob_id:07d}'
-    mesh = run_one_ob(base_dir=base_dir, cfg=cfg, use_refined_mask=True)
+    if not os.path.exists(base_dir):
+      logging.warning(f'skip ob_{ob_id:07d}: {base_dir} does not exist')
+      continue
+    try:
+      mesh = run_one_ob(base_dir=base_dir, cfg=cfg, use_refined_mask=True)
+    except Exception as e:
+      logging.exception(f'skip ob_{ob_id:07d} due to error: {e}')
+      continue
     out_file = f'{base_dir}/model/model.obj'
     os.makedirs(os.path.dirname(out_file), exist_ok=True)
     mesh.export(out_file)
