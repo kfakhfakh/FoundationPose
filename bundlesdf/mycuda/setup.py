@@ -35,6 +35,7 @@ setup(
     include_dirs=[
         "/usr/local/include/eigen3",
         "/usr/include/eigen3",
+        "/home/khaled/miniconda3/include/eigen3",
     ],
     cmdclass={
         'build_ext': BuildExtension
