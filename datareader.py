@@ -74,6 +74,7 @@ class YcbineoatReader:
     self.W = int(self.W*self.downscale)
     self.K[:2] *= self.downscale
 
+    self.mask_files = sorted(glob.glob(f'{self.video_dir}/masks/*'))
     self.gt_pose_files = sorted(glob.glob(f'{self.video_dir}/annotated_poses/*'))
 
     self.videoname_to_object = {
@@ -110,13 +111,27 @@ class YcbineoatReader:
     return color
 
   def get_mask(self,i):
-    mask = cv2.imread(self.color_files[i].replace('rgb','masks'),-1)
-    if len(mask.shape)==3:
+    mask_path = self.color_files[i].replace(os.path.join('rgb', ''), os.path.join('masks', ''))
+    if not os.path.exists(mask_path):
+      if len(self.mask_files) == 1:
+        mask_path = self.mask_files[0]
+      else:
+        logging.info(f'Mask file not found for frame {i}: {mask_path}, using all-ones mask')
+        return np.ones((self.H, self.W), dtype=np.uint8)
+
+    mask = cv2.imread(mask_path, -1)
+    if mask is None:
+      if len(self.mask_files) == 1:
+        mask = cv2.imread(self.mask_files[0], -1)
+      if mask is None:
+        raise RuntimeError(f'Cannot read mask file: {mask_path}')
+
+    if mask.ndim == 3:
       for c in range(3):
-        if mask[...,c].sum()>0:
+        if mask[...,c].sum() > 0:
           mask = mask[...,c]
           break
-    mask = cv2.resize(mask, (self.W,self.H), interpolation=cv2.INTER_NEAREST).astype(bool).astype(np.uint8)
+    mask = cv2.resize(mask, (self.W, self.H), interpolation=cv2.INTER_NEAREST).astype(bool).astype(np.uint8)
     return mask
 
   def get_depth(self,i):

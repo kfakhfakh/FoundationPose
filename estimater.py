@@ -21,7 +21,8 @@ class FoundationPose:
     self.ignore_normal_flip = True
     self.debug = debug
     self.debug_dir = debug_dir
-    os.makedirs(debug_dir, exist_ok=True)
+    if self.debug >= 2 and self.debug_dir is not None:
+      os.makedirs(self.debug_dir, exist_ok=True)
 
     self.reset_object(model_pts, model_normals, symmetry_tfs=symmetry_tfs, mesh=mesh)
     self.make_rotation_grid(min_n_views=40, inplane_step=60)
@@ -161,7 +162,7 @@ class FoundationPose:
     @pts: (N,3) np array, downsampled scene points
     '''
     set_seed(0)
-    logging.info('Welcome')
+    logging.debug('Welcome')
 
     if self.glctx is None:
       if glctx is None:
@@ -183,7 +184,7 @@ class FoundationPose:
     normal_map = None
     valid = (depth>=0.001) & (ob_mask>0)
     if valid.sum()<4:
-      logging.info(f'valid too small, return')
+      logging.debug(f'valid too small, return')
       pose = np.eye(4)
       pose[:3,3] = self.guess_translation(depth=depth, mask=ob_mask, K=K)
       return pose
@@ -202,14 +203,14 @@ class FoundationPose:
 
     poses = self.generate_random_pose_hypo(K=K, rgb=rgb, depth=depth, mask=ob_mask, scene_pts=None)
     poses = poses.data.cpu().numpy()
-    logging.info(f'poses:{poses.shape}')
+    logging.debug(f'poses:{poses.shape}')
     center = self.guess_translation(depth=depth, mask=ob_mask, K=K)
 
     poses = torch.as_tensor(poses, device='cuda', dtype=torch.float)
     poses[:,:3,3] = torch.as_tensor(center.reshape(1,3), device='cuda')
 
     add_errs = self.compute_add_err_to_gt_pose(poses)
-    logging.info(f"after viewpoint, add_errs min:{add_errs.min()}")
+    logging.debug(f"after viewpoint, add_errs min:{add_errs.min()}")
 
     xyz_map = depth2xyzmap(depth, K)
     poses, vis = self.refiner.predict(mesh=self.mesh, mesh_tensors=self.mesh_tensors, rgb=rgb, depth=depth, K=K, ob_in_cams=poses.data.cpu().numpy(), normal_map=normal_map, xyz_map=xyz_map, glctx=self.glctx, mesh_diameter=self.diameter, iteration=iteration, get_vis=self.debug>=2)
@@ -221,14 +222,14 @@ class FoundationPose:
       imageio.imwrite(f'{self.debug_dir}/vis_score.png', vis)
 
     add_errs = self.compute_add_err_to_gt_pose(poses)
-    logging.info(f"final, add_errs min:{add_errs.min()}")
+    logging.debug(f"final, add_errs min:{add_errs.min()}")
 
     ids = torch.as_tensor(scores).argsort(descending=True)
-    logging.info(f'sort ids:{ids}')
+    logging.debug(f'sort ids:{ids}')
     scores = scores[ids]
     poses = poses[ids]
 
-    logging.info(f'sorted scores:{scores}')
+    logging.debug(f'sorted scores:{scores}')
 
     best_pose = poses[0]@self.get_tf_to_centered_mesh()
     self.pose_last = poses[0]
@@ -251,17 +252,17 @@ class FoundationPose:
     if self.pose_last is None:
       logging.info("Please init pose by register first")
       raise RuntimeError
-    logging.info("Welcome")
+    logging.debug("Welcome")
 
     depth = torch.as_tensor(depth, device='cuda', dtype=torch.float)
     depth = erode_depth(depth, radius=2, device='cuda')
     depth = bilateral_filter_depth(depth, radius=2, device='cuda')
-    logging.info("depth processing done")
+    logging.debug("depth processing done")
 
     xyz_map = depth2xyzmap_batch(depth[None], torch.as_tensor(K, dtype=torch.float, device='cuda')[None], zfar=np.inf)[0]
 
     pose, vis = self.refiner.predict(mesh=self.mesh, mesh_tensors=self.mesh_tensors, rgb=rgb, depth=depth, K=K, ob_in_cams=self.pose_last.reshape(1,4,4).data.cpu().numpy(), normal_map=None, xyz_map=xyz_map, mesh_diameter=self.diameter, glctx=self.glctx, iteration=iteration, get_vis=self.debug>=2)
-    logging.info("pose done")
+    logging.debug("pose done")
     if self.debug>=2:
       extra['vis'] = vis
     self.pose_last = pose
