@@ -340,24 +340,54 @@ def inference_loop(reader, objects, estimators, args):
       live_view_enabled = False
       logging.warning('Live preview could not be initialized. Continuing without cv2.imshow.')
 
+  # Timing statistics
+  timing_stats = defaultdict(list)
+  total_start = time.time()
+
   for frame_idx in range(len(reader)):
+    frame_start = time.time()
     frame_id = reader.id_strs[frame_idx]
+    logging.info(f'\n{"=" * 70}')
     logging.info(f'Frame {frame_idx + 1}/{len(reader)}: {frame_id}')
+    logging.info(f'{"=" * 70}')
+
+    # Load frame data
+    load_start = time.time()
     color = reader.get_color(frame_idx)
+    color_time = time.time() - load_start
+    timing_stats['load_color'].append(color_time)
+    logging.info(f'  [LOAD] Color image: {color_time*1000:.2f}ms')
+
+    depth_start = time.time()
     depth = reader.get_depth(frame_idx)
+    depth_time = time.time() - depth_start
+    timing_stats['load_depth'].append(depth_time)
+    logging.info(f'  [LOAD] Depth image: {depth_time*1000:.2f}ms')
+
     if args.depth_scale != 1.0:
       depth = depth.astype(np.float32, copy=False) * args.depth_scale
 
     vis = color.copy()
+
     for object_info, estimator in active_pairs:
       object_name = object_info['name']
       pose = None
+
+      # Get mask
+      mask_start = time.time()
+      mask = reader.get_mask(frame_idx, object_name)
+      mask_time = time.time() - mask_start
+      timing_stats[f'load_mask_{object_name}'].append(mask_time)
+      logging.info(f'  [LOAD] Mask ({object_name}): {mask_time*1000:.2f}ms')
+
+      if mask is None or mask.sum() == 0:
+        logging.info(f'  [SKIP] {object_name}: No valid mask')
+        continue
+
       if estimator.pose_last is None:
-        mask = reader.get_mask(frame_idx, object_name)
-        if mask is None or mask.sum() == 0:
-          continue
+        # Registration (initialization)
         torch.cuda.synchronize()
-        start_time = time.time()
+        pose_start = time.time()
         pose = estimator.register(
           K=reader.cam_K,
           rgb=color,
@@ -365,37 +395,56 @@ def inference_loop(reader, objects, estimators, args):
           ob_mask=mask,
           iteration=args.est_refine_iter,
         )
+        pose_time = time.time() - pose_start
+        timing_stats[f'register_{object_name}'].append(pose_time)
+        logging.info(f'  [REGISTER] {object_name}: {pose_time:.3f}s')
+
         if estimator.pose_last is None:
           centered_pose = torch.as_tensor(pose, device='cuda', dtype=torch.float) @ torch.linalg.inv(estimator.get_tf_to_centered_mesh())
           estimator.pose_last = centered_pose
       else:
+        # Tracking
         torch.cuda.synchronize()
-        start_time = time.time()
+        pose_start = time.time()
         pose = estimator.track_one(
           rgb=color,
           depth=depth,
           K=reader.cam_K,
           iteration=args.track_refine_iter,
         )
+        pose_time = time.time() - pose_start
+        timing_stats[f'track_{object_name}'].append(pose_time)
+        logging.info(f'  [TRACK] {object_name}: {pose_time:.3f}s')
 
       torch.cuda.synchronize()
-      elapsed = time.time() - start_time
-      logging.info(f'  {object_name}: {elapsed:.3f} sec')
 
       if pose is None:
+        logging.info(f'  [SKIP] {object_name}: Pose estimation failed')
         continue
 
+      # Save pose
+      save_start = time.time()
       frame_results[frame_id][object_name] = pose.tolist()
       if args.save_pose_txt:
         pose_dir = os.path.join(output_pose_dir, object_info['safe_name'])
         os.makedirs(pose_dir, exist_ok=True)
         np.savetxt(os.path.join(pose_dir, f'{frame_id}.txt'), pose.reshape(4, 4))
+      save_time = time.time() - save_start
+      timing_stats[f'save_pose_{object_name}'].append(save_time)
+      logging.info(f'  [SAVE] Pose ({object_name}): {save_time*1000:.2f}ms')
 
+      # Visualize
+      vis_start = time.time()
       center_pose = pose @ np.linalg.inv(object_info['to_origin'])
       line_color = color_from_name(object_name)
       vis = draw_posed_3d_box(reader.cam_K, img=vis, ob_in_cam=center_pose, bbox=object_info['bbox'], line_color=line_color)
       vis = draw_xyz_axis(vis, ob_in_cam=center_pose, scale=0.1, K=reader.cam_K, thickness=3, transparency=0, is_input_rgb=True)
+      vis_time = time.time() - vis_start
+      timing_stats[f'visualize_{object_name}'].append(vis_time)
+      logging.info(f'  [VIS] Draw ({object_name}): {vis_time*1000:.2f}ms')
 
+    # Display/save frame
+    display_start = time.time()
     if live_view_enabled:
       try:
         cv2.imshow('FoundationPose multi-object inference', vis[..., ::-1])
@@ -412,6 +461,14 @@ def inference_loop(reader, objects, estimators, args):
     if writer is not None:
       writer.write(vis[..., ::-1])
 
+    display_time = time.time() - display_start
+    timing_stats['display_frame'].append(display_time)
+    logging.info(f'  [DISPLAY] Frame display/save: {display_time*1000:.2f}ms')
+
+    frame_total = time.time() - frame_start
+    timing_stats['total_per_frame'].append(frame_total)
+    logging.info(f'  [TOTAL] Frame {frame_idx + 1} processed in {frame_total:.3f}s')
+
   if writer is not None:
     writer.release()
 
@@ -423,6 +480,30 @@ def inference_loop(reader, objects, estimators, args):
     result_path = os.path.join(args.debug_dir, 'poses.json')
     with open(result_path, 'w', encoding='utf-8') as ff:
       json.dump(frame_results, ff, indent=2)
+
+  # Print timing summary
+  total_time = time.time() - total_start
+  print("\n" + "=" * 80)
+  print("⏱️  INFERENCE TIMING SUMMARY")
+  print("=" * 80)
+  print(f"Total inference time: {total_time:.2f}s")
+  print(f"Total frames processed: {len(reader)}")
+  print(f"Average time per frame: {total_time / len(reader):.3f}s")
+  print("\nDetailed timing breakdown:")
+  print("-" * 80)
+
+  for key in sorted(timing_stats.keys()):
+    times = timing_stats[key]
+    total = sum(times)
+    avg = total / len(times) if times else 0
+    if len(times) == 1:
+      print(f"  {key:45s}: {times[0]:8.3f}s")
+    else:
+      min_t = min(times)
+      max_t = max(times)
+      print(f"  {key:45s}: Total={total:8.2f}s | Avg={avg:7.3f}s | Min={min_t:7.3f}s | Max={max_t:7.3f}s | Count={len(times)}")
+
+  print("=" * 80 + "\n")
 
 
 if __name__ == '__main__':
