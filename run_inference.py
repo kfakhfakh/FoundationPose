@@ -131,6 +131,42 @@ def load_frame(reader, i, need_mask=False):
   return {'color': color, 'depth': depth, 'mask': mask}
 
 
+def extract_translation_and_rotation(pose_matrix):
+  """
+  Extract translation vector and rotation angles (Euler angles) from a 4x4 pose matrix.
+  
+  Args:
+    pose_matrix: 4x4 numpy array or torch tensor representing the pose
+  
+  Returns:
+    translation: 3D translation vector (x, y, z) in meters
+    euler_angles: Rotation as Euler angles (roll, pitch, yaw) in degrees
+  """
+  if isinstance(pose_matrix, torch.Tensor):
+    pose_matrix = pose_matrix.cpu().numpy()
+  
+  # Extract translation (last column, first 3 rows)
+  translation = pose_matrix[:3, 3]
+  
+  # Extract rotation matrix (top-left 3x3)
+  rotation_matrix = pose_matrix[:3, :3]
+  
+  # Convert rotation matrix to Euler angles (ZYX convention)
+  # Roll (rotation around X-axis)
+  roll = np.arctan2(rotation_matrix[2, 1], rotation_matrix[2, 2])
+  
+  # Pitch (rotation around Y-axis)
+  pitch = np.arcsin(-rotation_matrix[2, 0])
+  
+  # Yaw (rotation around Z-axis)
+  yaw = np.arctan2(rotation_matrix[1, 0], rotation_matrix[0, 0])
+  
+  # Convert from radians to degrees
+  euler_angles = np.array([np.degrees(roll), np.degrees(pitch), np.degrees(yaw)])
+  
+  return translation, euler_angles
+
+
 def inference_loop(reader, mesh, args):
   to_origin, extents = trimesh.bounds.oriented_bounds(mesh)
   bbox = np.stack([-extents/2, extents/2], axis=0).reshape(2,3)
@@ -182,6 +218,14 @@ def inference_loop(reader, mesh, args):
     frame_time = time.time() - frame_start
     logging.info(f'Frame {i+1} inference time: {frame_time:.3f} sec (GPU compute: {gpu_time:.3f} sec)')
 
+    # Print pose information if requested
+    if args.print_pose_info:
+      translation, euler_angles = extract_translation_and_rotation(pose)
+      print(f"\n--- Frame {i} ---")
+      print(f"Translation (meters): x={translation[0]:.6f}, y={translation[1]:.6f}, z={translation[2]:.6f}")
+      print(f"Distance from camera: {np.linalg.norm(translation):.6f} meters")
+      print(f"Rotation (Euler angles in degrees): roll={euler_angles[0]:.2f}°, pitch={euler_angles[1]:.2f}°, yaw={euler_angles[2]:.2f}°")
+
     os.makedirs(f'{args.debug_dir}/ob_in_cam', exist_ok=True)
     np.savetxt(f'{args.debug_dir}/ob_in_cam/{reader.id_strs[i]}.txt', pose.reshape(4,4))
 
@@ -225,6 +269,7 @@ if __name__ == '__main__':
   parser.add_argument('--debug', type=int, default=1)
   parser.add_argument('--debug_dir', type=str, default=f'{code_dir}/debug')
   parser.add_argument('--save_video', type=int, default=0, help='Save output visualization as mp4')
+  parser.add_argument('--print_pose_info', type=int, default=0, help='Print translation and rotation info for each frame to terminal')
   parser.add_argument('--device', type=int, default=0, help='CUDA device id to use for inference')
   args = parser.parse_args()
 

@@ -44,6 +44,42 @@ def strip_known_image_extension(name):
   return text
 
 
+def extract_translation_and_rotation(pose_matrix):
+  """
+  Extract translation vector and rotation angles (Euler angles) from a 4x4 pose matrix.
+  
+  Args:
+    pose_matrix: 4x4 numpy array or torch tensor representing the pose
+  
+  Returns:
+    translation: 3D translation vector (x, y, z) in meters
+    euler_angles: Rotation as Euler angles (roll, pitch, yaw) in degrees
+  """
+  if isinstance(pose_matrix, torch.Tensor):
+    pose_matrix = pose_matrix.cpu().numpy()
+  
+  # Extract translation (last column, first 3 rows)
+  translation = pose_matrix[:3, 3]
+  
+  # Extract rotation matrix (top-left 3x3)
+  rotation_matrix = pose_matrix[:3, :3]
+  
+  # Convert rotation matrix to Euler angles (ZYX convention)
+  # Roll (rotation around X-axis)
+  roll = np.arctan2(rotation_matrix[2, 1], rotation_matrix[2, 2])
+  
+  # Pitch (rotation around Y-axis)
+  pitch = np.arcsin(-rotation_matrix[2, 0])
+  
+  # Yaw (rotation around Z-axis)
+  yaw = np.arctan2(rotation_matrix[1, 0], rotation_matrix[0, 0])
+  
+  # Convert from radians to degrees
+  euler_angles = np.array([np.degrees(roll), np.degrees(pitch), np.degrees(yaw)])
+  
+  return translation, euler_angles
+
+
 def setup_torch(device_id):
   if not torch.cuda.is_available():
     raise RuntimeError('CUDA is not available. Please run on a machine with CUDA drivers and a compatible GPU.')
@@ -136,20 +172,74 @@ class FolderSceneReader:
     if not os.path.isdir(self.masks_dir):
       return
 
+    frame_norm_to_id = {normalize_name(frame_id): frame_id for frame_id in self.id_strs}
+
     for mask_path in sorted(Path(self.masks_dir).rglob('*')):
       if mask_path.suffix.lower() not in IMAGE_EXTS:
         continue
       self.mask_files.append(mask_path)
 
-      # Naming convention: masks/obj_000005.png -> object name is obj_000005.
-      object_name_clean = strip_known_image_extension(mask_path.stem)
-      object_norm = normalize_name(object_name_clean)
-      if not object_norm:
-        continue
+      rel_path = mask_path.relative_to(self.masks_dir)
+      folder_parts = list(rel_path.parts[:-1])
+      stem = mask_path.stem
+      stem_tokens = [token for token in re.split(r'[_\-\s]+', stem) if token]
+      candidate_object_names = set()
+      candidate_frame_ids = set()
 
-      if object_norm not in self.object_name_lookup:
-        self.object_name_lookup[object_norm] = object_name_clean
-      self.object_to_paths[object_norm].append(mask_path)
+      for part in folder_parts:
+        part_norm = normalize_name(part)
+        if part_norm in self.frame_id_norms:
+          candidate_frame_ids.add(part_norm)
+        elif part_norm:
+          candidate_object_names.add(part)
+
+      stem_norm = normalize_name(stem)
+      if stem_norm in self.frame_id_norms:
+        candidate_frame_ids.add(stem_norm)
+
+      for token in stem_tokens:
+        token_norm = normalize_name(token)
+        if token_norm in self.frame_id_norms:
+          candidate_frame_ids.add(token_norm)
+        elif token_norm and not token_norm.isdigit():
+          candidate_object_names.add(token)
+
+      # Handle names like frame_obj, obj_frame, or frame-obj while avoiding frame-only object ids.
+      if len(candidate_frame_ids) > 0:
+        for frame_norm in list(candidate_frame_ids):
+          frame_id = frame_norm_to_id[frame_norm]
+          if stem.startswith(frame_id + '_') or stem.startswith(frame_id + '-'):
+            suffix = stem[len(frame_id) + 1:]
+            if suffix:
+              candidate_object_names.add(suffix)
+          if stem.endswith('_' + frame_id) or stem.endswith('-' + frame_id):
+            prefix = stem[:-(len(frame_id) + 1)]
+            if prefix:
+              candidate_object_names.add(prefix)
+
+      # Keep the full mask stem as a candidate object name unless it is exactly a frame id.
+      # This preserves names like obj_000019 that would otherwise collapse to "obj".
+      if stem_norm not in self.frame_id_norms:
+        candidate_object_names.add(stem)
+
+      parent_norm = normalize_name(mask_path.parent.name)
+      if parent_norm and parent_norm not in self.frame_id_norms and parent_norm != normalize_name(Path(self.masks_dir).name):
+        candidate_object_names.add(mask_path.parent.name)
+
+      for object_name in candidate_object_names:
+        object_name_clean = strip_known_image_extension(object_name)
+        object_norm = normalize_name(object_name_clean)
+        if not object_norm:
+          continue
+        if object_norm in self.frame_id_norms:
+          continue
+        if object_norm.isdigit():
+          continue
+        if object_norm and object_norm not in self.object_name_lookup:
+          self.object_name_lookup[object_norm] = object_name_clean
+        self.object_to_paths[object_norm].append(mask_path)
+        for frame_norm in candidate_frame_ids:
+          self.mask_index[(frame_norm, object_norm)] = mask_path
 
   def discover_object_names(self):
     object_names = []
@@ -203,32 +293,67 @@ class FolderSceneReader:
 
   def get_mask(self, i, object_name):
     object_norm = normalize_name(object_name)
-    paths = self.object_to_paths.get(object_norm, [])
-    if len(paths) == 0:
-      return None
+    frame_norm = normalize_name(self.id_strs[i])
+    mask_path = self.mask_index.get((frame_norm, object_norm))
+    if mask_path is None:
+      paths = self.object_to_paths.get(object_norm, [])
+      if len(paths) == 0:
+        return None
 
-    # One mask per object naming convention.
-    mask_path = paths[0]
+      # Fallback: try to find a mask file matching this frame id by stem.
+      for candidate in paths:
+        stem = candidate.stem
+        stem_norm = normalize_name(stem)
+        if stem_norm == frame_norm:
+          mask_path = candidate
+          break
+        if stem.startswith(self.id_strs[i] + '_') or stem.startswith(self.id_strs[i] + '-'):
+          mask_path = candidate
+          break
+        if stem.endswith('_' + self.id_strs[i]) or stem.endswith('-' + self.id_strs[i]):
+          mask_path = candidate
+          break
+
+      # If still unresolved, use the first available mask for this object.
+      # This supports "one mask per object" initialization workflows.
+      if mask_path is None:
+        mask_path = paths[0]
     return self._read_mask_file(mask_path)
 
 
 def build_model_index(models_dir):
-  if not os.path.isdir(models_dir):
-    raise RuntimeError(f'Models folder not found: {models_dir}')
-
   model_index = {}
+  model_files = []
   for path in Path(models_dir).rglob('*'):
-    if not path.is_file() or path.suffix.lower() not in MESH_EXTS:
-      continue
-    object_norm = normalize_name(path.stem)
-    if object_norm and object_norm not in model_index:
-      model_index[object_norm] = path
+    if path.suffix.lower() in MESH_EXTS:
+      model_files.append(path)
+  for mesh_path in sorted(model_files):
+    candidate_names = [mesh_path.stem, mesh_path.parent.name]
+    if mesh_path.parent.parent != mesh_path.parent:
+      candidate_names.append(mesh_path.parent.parent.name)
+    for candidate_name in candidate_names:
+      candidate_norm = normalize_name(candidate_name)
+      if not candidate_norm:
+        continue
+      if candidate_norm not in model_index:
+        model_index[candidate_norm] = mesh_path
   return model_index
 
 
 def resolve_mesh_path(model_index, object_name):
   object_norm = normalize_name(object_name)
-  return model_index.get(object_norm)
+  if object_norm in model_index:
+    return model_index[object_norm]
+
+  best_path = None
+  best_score = None
+  for candidate_norm, mesh_path in model_index.items():
+    if object_norm in candidate_norm or candidate_norm in object_norm:
+      score = abs(len(candidate_norm) - len(object_norm))
+      if best_score is None or score < best_score:
+        best_score = score
+        best_path = mesh_path
+  return best_path
 
 
 def load_object_meshes(reader, models_dir, mesh_scale):
@@ -236,8 +361,6 @@ def load_object_meshes(reader, models_dir, mesh_scale):
   object_names = reader.discover_object_names()
   if len(object_names) == 0:
     raise RuntimeError(f'No object masks were discovered in {reader.masks_dir}')
-
-  logging.info(f'Detected mask objects ({len(object_names)}): {sorted(object_names)}')
 
   selected_objects = []
   missing_models = []
@@ -271,10 +394,6 @@ def load_object_meshes(reader, models_dir, mesh_scale):
   if len(missing_models) > 0:
     logging.info(f'Skipped masks without matching models: {missing_models}')
 
-  logging.info('Resolved object->model mapping:')
-  for obj in selected_objects:
-    logging.info(f"  {obj['name']} -> {obj['mesh_path']}")
-
   return selected_objects
 
 
@@ -302,16 +421,6 @@ def build_estimators(objects, args):
 
 
 def inference_loop(reader, objects, estimators, args):
-  # Only run inference for objects that have a resolved model and estimator.
-  if len(objects) != len(estimators):
-    raise RuntimeError('Internal mismatch: objects and estimators must have the same length')
-
-  active_pairs = [(obj, est) for obj, est in zip(objects, estimators) if obj.get('mesh_path')]
-  if len(active_pairs) == 0:
-    raise RuntimeError('No valid object-model pairs available for inference')
-
-  logging.info(f'Running inference on {len(active_pairs)} resolved models only')
-
   frame_results = defaultdict(dict)
   output_pose_dir = os.path.join(args.debug_dir, 'ob_in_cam')
   if args.save_pose_txt:
@@ -340,54 +449,24 @@ def inference_loop(reader, objects, estimators, args):
       live_view_enabled = False
       logging.warning('Live preview could not be initialized. Continuing without cv2.imshow.')
 
-  # Timing statistics
-  timing_stats = defaultdict(list)
-  total_start = time.time()
-
   for frame_idx in range(len(reader)):
-    frame_start = time.time()
     frame_id = reader.id_strs[frame_idx]
-    logging.info(f'\n{"=" * 70}')
     logging.info(f'Frame {frame_idx + 1}/{len(reader)}: {frame_id}')
-    logging.info(f'{"=" * 70}')
-
-    # Load frame data
-    load_start = time.time()
     color = reader.get_color(frame_idx)
-    color_time = time.time() - load_start
-    timing_stats['load_color'].append(color_time)
-    logging.info(f'  [LOAD] Color image: {color_time*1000:.2f}ms')
-
-    depth_start = time.time()
     depth = reader.get_depth(frame_idx)
-    depth_time = time.time() - depth_start
-    timing_stats['load_depth'].append(depth_time)
-    logging.info(f'  [LOAD] Depth image: {depth_time*1000:.2f}ms')
-
     if args.depth_scale != 1.0:
       depth = depth.astype(np.float32, copy=False) * args.depth_scale
 
     vis = color.copy()
-
-    for object_info, estimator in active_pairs:
+    for object_info, estimator in zip(objects, estimators):
       object_name = object_info['name']
       pose = None
-
-      # Get mask
-      mask_start = time.time()
-      mask = reader.get_mask(frame_idx, object_name)
-      mask_time = time.time() - mask_start
-      timing_stats[f'load_mask_{object_name}'].append(mask_time)
-      logging.info(f'  [LOAD] Mask ({object_name}): {mask_time*1000:.2f}ms')
-
-      if mask is None or mask.sum() == 0:
-        logging.info(f'  [SKIP] {object_name}: No valid mask')
-        continue
-
       if estimator.pose_last is None:
-        # Registration (initialization)
+        mask = reader.get_mask(frame_idx, object_name)
+        if mask is None or mask.sum() == 0:
+          continue
         torch.cuda.synchronize()
-        pose_start = time.time()
+        start_time = time.time()
         pose = estimator.register(
           K=reader.cam_K,
           rgb=color,
@@ -395,56 +474,45 @@ def inference_loop(reader, objects, estimators, args):
           ob_mask=mask,
           iteration=args.est_refine_iter,
         )
-        pose_time = time.time() - pose_start
-        timing_stats[f'register_{object_name}'].append(pose_time)
-        logging.info(f'  [REGISTER] {object_name}: {pose_time:.3f}s')
-
         if estimator.pose_last is None:
           centered_pose = torch.as_tensor(pose, device='cuda', dtype=torch.float) @ torch.linalg.inv(estimator.get_tf_to_centered_mesh())
           estimator.pose_last = centered_pose
       else:
-        # Tracking
         torch.cuda.synchronize()
-        pose_start = time.time()
+        start_time = time.time()
         pose = estimator.track_one(
           rgb=color,
           depth=depth,
           K=reader.cam_K,
           iteration=args.track_refine_iter,
         )
-        pose_time = time.time() - pose_start
-        timing_stats[f'track_{object_name}'].append(pose_time)
-        logging.info(f'  [TRACK] {object_name}: {pose_time:.3f}s')
 
       torch.cuda.synchronize()
+      elapsed = time.time() - start_time
+      logging.info(f'  {object_name}: {elapsed:.3f} sec')
 
       if pose is None:
-        logging.info(f'  [SKIP] {object_name}: Pose estimation failed')
         continue
 
-      # Save pose
-      save_start = time.time()
+      # Print pose information if requested
+      if args.print_pose_info:
+        translation, euler_angles = extract_translation_and_rotation(pose)
+        print(f"\n--- Object: {object_name} (Frame {frame_id}) ---")
+        print(f"Translation (meters): x={translation[0]:.6f}, y={translation[1]:.6f}, z={translation[2]:.6f}")
+        print(f"Distance from camera: {np.linalg.norm(translation):.6f} meters")
+        print(f"Rotation (Euler angles in degrees): roll={euler_angles[0]:.2f}°, pitch={euler_angles[1]:.2f}°, yaw={euler_angles[2]:.2f}°")
+
       frame_results[frame_id][object_name] = pose.tolist()
       if args.save_pose_txt:
         pose_dir = os.path.join(output_pose_dir, object_info['safe_name'])
         os.makedirs(pose_dir, exist_ok=True)
         np.savetxt(os.path.join(pose_dir, f'{frame_id}.txt'), pose.reshape(4, 4))
-      save_time = time.time() - save_start
-      timing_stats[f'save_pose_{object_name}'].append(save_time)
-      logging.info(f'  [SAVE] Pose ({object_name}): {save_time*1000:.2f}ms')
 
-      # Visualize
-      vis_start = time.time()
       center_pose = pose @ np.linalg.inv(object_info['to_origin'])
       line_color = color_from_name(object_name)
       vis = draw_posed_3d_box(reader.cam_K, img=vis, ob_in_cam=center_pose, bbox=object_info['bbox'], line_color=line_color)
       vis = draw_xyz_axis(vis, ob_in_cam=center_pose, scale=0.1, K=reader.cam_K, thickness=3, transparency=0, is_input_rgb=True)
-      vis_time = time.time() - vis_start
-      timing_stats[f'visualize_{object_name}'].append(vis_time)
-      logging.info(f'  [VIS] Draw ({object_name}): {vis_time*1000:.2f}ms')
 
-    # Display/save frame
-    display_start = time.time()
     if live_view_enabled:
       try:
         cv2.imshow('FoundationPose multi-object inference', vis[..., ::-1])
@@ -461,14 +529,6 @@ def inference_loop(reader, objects, estimators, args):
     if writer is not None:
       writer.write(vis[..., ::-1])
 
-    display_time = time.time() - display_start
-    timing_stats['display_frame'].append(display_time)
-    logging.info(f'  [DISPLAY] Frame display/save: {display_time*1000:.2f}ms')
-
-    frame_total = time.time() - frame_start
-    timing_stats['total_per_frame'].append(frame_total)
-    logging.info(f'  [TOTAL] Frame {frame_idx + 1} processed in {frame_total:.3f}s')
-
   if writer is not None:
     writer.release()
 
@@ -480,30 +540,6 @@ def inference_loop(reader, objects, estimators, args):
     result_path = os.path.join(args.debug_dir, 'poses.json')
     with open(result_path, 'w', encoding='utf-8') as ff:
       json.dump(frame_results, ff, indent=2)
-
-  # Print timing summary
-  total_time = time.time() - total_start
-  print("\n" + "=" * 80)
-  print("⏱️  INFERENCE TIMING SUMMARY")
-  print("=" * 80)
-  print(f"Total inference time: {total_time:.2f}s")
-  print(f"Total frames processed: {len(reader)}")
-  print(f"Average time per frame: {total_time / len(reader):.3f}s")
-  print("\nDetailed timing breakdown:")
-  print("-" * 80)
-
-  for key in sorted(timing_stats.keys()):
-    times = timing_stats[key]
-    total = sum(times)
-    avg = total / len(times) if times else 0
-    if len(times) == 1:
-      print(f"  {key:45s}: {times[0]:8.3f}s")
-    else:
-      min_t = min(times)
-      max_t = max(times)
-      print(f"  {key:45s}: Total={total:8.2f}s | Avg={avg:7.3f}s | Min={min_t:7.3f}s | Max={max_t:7.3f}s | Count={len(times)}")
-
-  print("=" * 80 + "\n")
 
 
 if __name__ == '__main__':
@@ -524,6 +560,7 @@ if __name__ == '__main__':
   parser.add_argument('--save_video', type=int, default=0, help='Save output visualization as mp4')
   parser.add_argument('--save_pose_txt', type=int, default=0, help='Save per-frame pose text files under debug/ob_in_cam')
   parser.add_argument('--save_results_json', type=int, default=0, help='Save poses.json under debug_dir')
+  parser.add_argument('--print_pose_info', type=int, default=0, help='Print translation and rotation info for each detected object to terminal')
   parser.add_argument('--device', type=int, default=0, help='CUDA device id to use for inference')
   args = parser.parse_args()
 
