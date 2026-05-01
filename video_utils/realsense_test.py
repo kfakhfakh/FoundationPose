@@ -16,9 +16,6 @@ profile = pipeline.start(config)
 # Create alignment object (align depth to color)
 align = rs.align(rs.stream.color)
 
-# Depth colorizer
-colorizer = rs.colorizer()
-
 try:
     while True:
         # Get frames
@@ -35,7 +32,12 @@ try:
 
         # Convert to numpy arrays
         color_image = np.asanyarray(color_frame.get_data())
-        depth_colored = np.asanyarray(colorizer.colorize(depth_frame).get_data())
+
+        # RAW depth (no colorizing)
+        depth_image = np.asanyarray(depth_frame.get_data())
+
+        # Normalize depth for visualization (important!)
+        depth_display = cv2.convertScaleAbs(depth_image, alpha=0.03)
 
         # Center pixel
         h, w, _ = color_image.shape
@@ -56,11 +58,11 @@ try:
                     2)
 
         # Draw marker on depth
-        cv2.circle(depth_colored, (x, y), 8, (255, 255, 255), 2)
+        cv2.circle(depth_display, (x, y), 8, (255, 255, 255), 2)
 
         # Show images
         cv2.imshow("RGB (aligned)", color_image)
-        cv2.imshow("Depth (aligned)", depth_colored)
+        cv2.imshow("Depth (raw)", depth_display)
 
         print("Distance at center pixel:", dist, "meters")
 
