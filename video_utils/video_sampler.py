@@ -8,7 +8,7 @@ import time
 # CONFIG
 # =========================
 BASE_FOLDER = "dataset"   # change this
-SAVE_FPS = 4              # frames per second to save
+SAVE_FPS = 6              # frames per second to save
 # =========================
 
 rgb_folder = os.path.join(BASE_FOLDER, "rgb")
@@ -59,8 +59,8 @@ try:
         current_time = time.time()
         if current_time - last_save_time >= save_interval:
 
-            rgb_path = os.path.join(rgb_folder, f"frame_{frame_id:06d}.png")
-            depth_path = os.path.join(depth_folder, f"frame_{frame_id:06d}.png")
+            rgb_path = os.path.join(rgb_folder, f"{frame_id:06d}.png")
+            depth_path = os.path.join(depth_folder, f"{frame_id:06d}.png")
 
             cv2.imwrite(rgb_path, color_image)
             cv2.imwrite(depth_path, depth_image)
