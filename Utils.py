@@ -973,7 +973,8 @@ class OctreeManager:
 
     ray_index, rays_pid, depth_in_out = kaolin.render.spc.unbatched_raytrace(self.octree,self.vox_point_all_levels,self.pyramids[0],self.exsum,rays_o,rays_d,level=level,return_depth=True,with_exit=True)
     if ray_index.size()[0] == 0:
-      pdb.set_trace()
+      if debug:
+        pdb.set_trace()
       print("[WARNING] batch has 0 intersections!!")
       ray_depths_in_out = torch.zeros((rays_o.shape[0],1,2))
       rays_pid = -torch.ones_like(rays_o[:, :1])

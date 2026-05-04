@@ -774,6 +774,9 @@ class NerfRunner:
     voxel_size = self.cfg['octree_raytracing_voxel_size']*self.cfg['sc_factor']
     level = int(np.floor(np.log2(2.0/voxel_size)))
     near,far,_,depths_in_out = self.octree_m.ray_trace(rays_o_w,viewdirs_w,level=level,debug=0)
+    near = near.to(ray_batch.device)
+    far = far.to(ray_batch.device)
+    depths_in_out = depths_in_out.to(ray_batch.device)
     z_vals,_ = self.sample_rays_uniform_occupied_voxels(rays_d=viewdirs,depths_in_out=depths_in_out,lindisp=lindisp,perturb=perturb, depths=depth, N_samples=self.cfg['N_samples'])
 
     if self.cfg['N_samples_around_depth']>0 and depth is not None:      #!NOTE only fine when depths are all valid
@@ -785,7 +788,7 @@ class NerfRunner:
       z_vals_around_depth = torch.zeros((N_rays,self.cfg['N_samples_around_depth']), device=ray_batch.device).float()
       # if torch.sum(inside_mask)>0:
       z_vals_around_depth[valid_depth_mask] = sample_rays_uniform(self.cfg['N_samples_around_depth'],near_depth.reshape(-1,1),far_depth.reshape(-1,1),lindisp=lindisp,perturb=perturb)
-      invalid_depth_mask = valid_depth_mask==0
+      invalid_depth_mask = (valid_depth_mask==0).to(ray_batch.device)
 
       if invalid_depth_mask.any() and self.cfg['use_octree']:
         z_vals_invalid,_ = self.sample_rays_uniform_occupied_voxels(rays_d=viewdirs[invalid_depth_mask],depths_in_out=depths_in_out[invalid_depth_mask],lindisp=lindisp,perturb=perturb, depths=None, N_samples=self.cfg['N_samples_around_depth'])

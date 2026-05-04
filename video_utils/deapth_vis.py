@@ -2,8 +2,8 @@ import cv2
 import numpy as np
 
 # Load your depth images (keep original depth values)
-depth_raw = cv2.imread(r"C:\Users\kfakh\Downloads\ycbv\ref_views_8\ob_0000021\depth\0000000.png", cv2.IMREAD_UNCHANGED)
-depth_enhanced = cv2.imread(r"C:\Users\kfakh\Downloads\ycbv\ref_views_8\ob_0000021\depth_enhanced\0000000.png", cv2.IMREAD_UNCHANGED)
+depth_raw = cv2.imread(r"C:\Users\kfakh\OneDrive\Desktop\falku\FoundationPose\video_utils\ref_views_1\rgb\0000000.png", cv2.IMREAD_UNCHANGED)
+depth_enhanced = cv2.imread(r"C:\Users\kfakh\OneDrive\Desktop\falku\FoundationPose\video_utils\ref_views_1\depth_enhanced\0000000.png", cv2.IMREAD_UNCHANGED)
 
 if depth_raw is None or depth_enhanced is None:
     print("Error loading images")
