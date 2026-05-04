@@ -2,6 +2,11 @@ import argparse
 import os
 import numpy as np
 import cv2
+import time
+try:
+    import pyrealsense2 as rs
+except Exception:
+    rs = None
 
 
 def estimate_marker_pose_from_corners(corner, marker_length, K, dist_coeffs=None):
@@ -65,22 +70,39 @@ def draw_axis(vis, K, rvec, tvec, axis_len, dist_coeffs=None):
     cv2.line(vis, origin, tuple(pts[3]), (255, 0, 0), 3)  # Z - blue
 
 
+def marker_area(corner):
+    pts = np.asarray(corner, dtype=np.float32).reshape(-1, 1, 2)
+    return abs(cv2.contourArea(pts))
+
+
 def main():
-    parser = argparse.ArgumentParser(description='Detect ArUco marker and get camera pose relative to marker')
-    parser.add_argument('--cam', type=int, default=0, help='Camera device index')
-    parser.add_argument('--marker-length', type=float, default=0.10, help='Marker side length in meters')
-    parser.add_argument('--cam-k-file', type=str, default=None, help='Optional camera intrinsics file (3x3 plain text)')
+    parser = argparse.ArgumentParser(description='Detect ArUco marker and get camera pose relative to marker (RealSense only)')
+    parser.add_argument('--cam', type=int, default=0, help='(ignored) Camera device index — RealSense required')
+    parser.add_argument('--marker-length', type=float, default=0.06, help='Marker side length in meters')
+    parser.add_argument('--cam-k-file', type=str, default="C:\\Users\\kfakh\\OneDrive\\Desktop\\falku\\camera_calibration.npz", help='Optional camera intrinsics file (3x3 plain text)')
     parser.add_argument('--calib-file', type=str, default=None, help='Optional npz calibration file with camera_matrix and distortion_coefficients')
     parser.add_argument('--axis-length', type=float, default=0.05, help='Length of axes to draw (meters)')
+    parser.add_argument('--resize', type=str, default='1280x720', help='Resize output view as WIDTHxHEIGHT (e.g. 1280x720)')
+    parser.add_argument('--save-dir', type=str, default=None, help='If set, save annotated resized frames to this directory')
     args = parser.parse_args()
 
-    cap = cv2.VideoCapture(args.cam)
-    if not cap.isOpened():
-        raise RuntimeError('Unable to open camera')
-
-    ret, frame = cap.read()
-    if not ret:
-        raise RuntimeError('Unable to read from camera')
+    # RealSense-only initialization
+    if rs is None:
+        raise RuntimeError('pyrealsense2 is not installed or could not be imported — RealSense is required')
+    pipeline = rs.pipeline()
+    config = rs.config()
+    config.enable_stream(rs.stream.depth, 1280, 720, rs.format.z16, 30)
+    config.enable_stream(rs.stream.color, 1920, 1080, rs.format.bgr8, 30)
+    profile = pipeline.start(config)
+    align = rs.align(rs.stream.color)
+    # prime one frame
+    frames = pipeline.wait_for_frames()
+    aligned = align.process(frames)
+    color_frame = aligned.get_color_frame()
+    if not color_frame:
+        pipeline.stop()
+        raise RuntimeError('Unable to get color frame from RealSense')
+    frame = np.asanyarray(color_frame.get_data())
     H, W = frame.shape[:2]
 
     # Load calibration if available (npz saved by calibrate script) or fall back to cam_k_file or approximate
@@ -97,8 +119,26 @@ def main():
 
     if K is None:
         if args.cam_k_file is not None and os.path.exists(args.cam_k_file):
-            K = np.loadtxt(args.cam_k_file).reshape(3, 3)
-            print(f'Loaded camera intrinsics from {args.cam_k_file}')
+            # Try loading as numpy file (.npz/.npy) first, then fallback to text
+            try:
+                loaded = np.load(args.cam_k_file, allow_pickle=True)
+                if isinstance(loaded, np.lib.npyio.NpzFile):
+                    if 'camera_matrix' in loaded:
+                        K = loaded['camera_matrix']
+                    elif 'arr_0' in loaded:
+                        K = loaded['arr_0']
+                    else:
+                        # pick the first array available
+                        keys = list(loaded.files)
+                        K = loaded[keys[0]]
+                else:
+                    K = loaded
+                K = np.asarray(K).reshape(3, 3)
+                print(f'Loaded camera intrinsics from {args.cam_k_file} (numpy)')
+            except Exception:
+                # fallback to text loading (specify utf-8)
+                K = np.loadtxt(args.cam_k_file, encoding='utf-8').reshape(3, 3)
+                print(f'Loaded camera intrinsics from {args.cam_k_file} (text)')
         else:
             f = 0.9 * max(W, H)
             K = np.array([[f, 0, W / 2.0], [0, f, H / 2.0], [0, 0, 1.0]])
@@ -107,6 +147,10 @@ def main():
     # ArUco setup
     aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
     parameters = cv2.aruco.DetectorParameters()
+    parameters.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+    parameters.cornerRefinementWinSize = 20
+    parameters.cornerRefinementMaxIterations = 100
+    parameters.cornerRefinementMinAccuracy = 0.001
     detector = cv2.aruco.ArucoDetector(aruco_dict, parameters)
 
     axis_len = args.axis_length
@@ -115,18 +159,23 @@ def main():
     print('Press space to print current pose. q to quit.')
 
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+        frames = pipeline.wait_for_frames()
+        aligned = align.process(frames)
+        color_frame = aligned.get_color_frame()
+        if not color_frame:
+            continue
+        frame = np.asanyarray(color_frame.get_data())
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         corners, ids, rejected = detector.detectMarkers(gray)
 
         vis = frame.copy()
 
+        best_pose = None
         if ids is not None and len(ids) > 0:
             for i, marker_id in enumerate(ids.flatten()):
                 try:
+                    area = marker_area(corners[i])
                     rvec, tvec = estimate_marker_pose_from_corners(corners[i], args.marker_length, K, dist)
                     
                     # marker_in_cam: where marker is relative to camera
@@ -137,6 +186,15 @@ def main():
                     
                     # Draw marker axis
                     draw_axis(vis, K, rvec, tvec, axis_len, dist)
+
+                    if best_pose is None or area > best_pose['area']:
+                        best_pose = {
+                            'id': int(marker_id),
+                            'area': area,
+                            'rvec': rvec,
+                            'tvec': tvec,
+                            'cam_in_marker': cam_in_marker,
+                        }
                     
                     # Extract camera translation (in meters, convert to cm) and rotation
                     cam_pos_m = cam_in_marker[:3, 3]
@@ -162,18 +220,34 @@ def main():
         else:
             cv2.putText(vis, 'No marker detected', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
-        cv2.imshow('ArUco Camera Pose', vis)
+        if best_pose is not None:
+            cv2.putText(vis, f'Using marker {best_pose["id"]} (best area)', (10, 125), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
+
+        # Resize, optionally save, then visualize
+        try:
+            rw, rh = args.resize.split('x')
+            rw, rh = int(rw), int(rh)
+        except Exception:
+            rw, rh = vis.shape[1], vis.shape[0]
+
+        vis_resized = cv2.resize(vis, (rw, rh))
+
+        if args.save_dir:
+            os.makedirs(args.save_dir, exist_ok=True)
+            ts = int(time.time() * 1000)
+            fname = os.path.join(args.save_dir, f'aruco_{ts}.png')
+            cv2.imwrite(fname, vis_resized)
+
+        cv2.imshow('ArUco Camera Pose', vis_resized)
         k = cv2.waitKey(1) & 0xFF
         
         if k == ord('q'):
             break
         
         if k == ord(' '):  # space key
-            if ids is not None and len(ids) > 0:
+            if best_pose is not None:
                 try:
-                    rvec, tvec = estimate_marker_pose_from_corners(corners[0], args.marker_length, K, dist)
-                    marker_in_cam = build_transform_from_rvec_tvec(rvec, tvec)
-                    cam_in_marker = np.linalg.inv(marker_in_cam)
+                    cam_in_marker = best_pose['cam_in_marker']
                     
                     cam_pos_m = cam_in_marker[:3, 3]
                     cam_pos_cm = cam_pos_m * 100
@@ -192,6 +266,7 @@ def main():
                     print(f'  Roll  (X): {cam_euler[0]:10.4f}°')
                     print(f'  Pitch (Y): {cam_euler[1]:10.4f}°')
                     print(f'  Yaw   (Z): {cam_euler[2]:10.4f}°')
+                    print(f'  Marker used: {best_pose["id"]}  area={best_pose["area"]:.1f} px^2')
                     print(f'\nFull 4x4 camera-in-marker matrix:')
                     np.set_printoptions(precision=6, suppress=True)
                     print(cam_in_marker)
@@ -201,7 +276,7 @@ def main():
             else:
                 print('No marker detected in current frame')
 
-    cap.release()
+    pipeline.stop()
     cv2.destroyAllWindows()
 
 
