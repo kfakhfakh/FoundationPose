@@ -21,6 +21,23 @@ def build_transform_from_rvec_tvec(rvec, tvec):
     return T
 
 
+def rotation_matrix_to_euler(R):
+    """Extract Euler angles (roll, pitch, yaw) in degrees from rotation matrix."""
+    sy = np.sqrt(R[0, 0] ** 2 + R[1, 0] ** 2)
+    singular = sy < 1e-6
+    
+    if not singular:
+        x = np.arctan2(R[2, 1], R[2, 2])
+        y = np.arctan2(-R[2, 0], sy)
+        z = np.arctan2(R[1, 0], R[0, 0])
+    else:
+        x = np.arctan2(-R[1, 2], R[1, 1])
+        y = np.arctan2(-R[2, 0], sy)
+        z = 0
+    
+    return np.array([np.degrees(x), np.degrees(y), np.degrees(z)])
+
+
 def build_transform_from_euler_and_translation(rx_deg, ry_deg, rz_deg, tx, ty, tz, order='xyz'):
     # rotations in degrees applied in order x then y then z by default
     rx = np.deg2rad(rx_deg)
@@ -125,14 +142,14 @@ def adjust_transform_from_key(key, tx, ty, tz, rx, ry, rz):
 def main():
     parser = argparse.ArgumentParser(description='Detect ArUco marker and draw object axis according to offset and rotations (RealSense only)')
     parser.add_argument('--cam', type=int, default=0, help='(ignored) Camera device index — RealSense required')
-    parser.add_argument('--marker-length', type=float, default=0.10, help='Marker side length in meters')
-    parser.add_argument('--cam-k-file', type=str, default=None, help='Optional camera intrinsics file (3x3 plain text)')
+    parser.add_argument('--marker-length', type=float, default=0.1, help='Marker side length in meters')
+    parser.add_argument('--cam-k-file', type=str, default="C:\\Users\\kfakh\\OneDrive\\Desktop\\falku\\camera_calibration.npz", help='Optional camera intrinsics file (3x3 plain text)')
     parser.add_argument('--calib-file', type=str, default=None, help='Optional npz calibration file with camera_matrix and distortion_coefficients')
     parser.add_argument('--resize', type=str, default='1280x720', help='Resize output view as WIDTHxHEIGHT (e.g. 1280x720)')
     parser.add_argument('--save-dir', type=str, default=None, help='If set, save annotated resized frames to this directory')
     parser.add_argument('--tx', type=float, default=0.0, help='Object offset X in marker frame (meters)')
-    parser.add_argument('--ty', type=float, default=-0.1, help='Object offset Y in marker frame (meters)')
-    parser.add_argument('--tz', type=float, default=0.015 , help='Object offset Z in marker frame (meters)')
+    parser.add_argument('--ty', type=float, default=-0.10, help='Object offset Y in marker frame (meters)')
+    parser.add_argument('--tz', type=float, default=0.015, help='Object offset Z in marker frame (meters)')
     parser.add_argument('--rx', type=float, default=0.0, help='Object rotation about X (deg) relative to marker')
     parser.add_argument('--ry', type=float, default=0.0, help='Object rotation about Y (deg) relative to marker')
     parser.add_argument('--rz', type=float, default=0.0, help='Object rotation about Z (deg) relative to marker')
@@ -216,7 +233,7 @@ def main():
     out_dir = 'captured_poses'
     os.makedirs(out_dir, exist_ok=True)
 
-    print('Press c to capture and print object-in-camera matrix. q to quit.')
+    print('Press Space to capture and print camera-in-object matrix. Escape to quit.')
 
     while True:
         frames = pipeline.wait_for_frames()
@@ -234,54 +251,101 @@ def main():
         best_pose = None
         if ids is not None and len(ids) > 0:
             for i, marker_id in enumerate(ids.flatten()):
-                area = marker_area(corners[i])
-                rvec, tvec = estimate_marker_pose_from_corners(corners[i], args.marker_length, K, dist)
-                T_cam_from_marker = build_transform_from_rvec_tvec(rvec, tvec)
+                try:
+                    area = marker_area(corners[i])
+                    rvec, tvec = estimate_marker_pose_from_corners(corners[i], args.marker_length, K, dist)
+                    
+                    # marker_in_cam: where marker is relative to camera
+                    marker_in_cam = build_transform_from_rvec_tvec(rvec, tvec)
+                    
+                    # cam_in_marker: where camera is relative to marker (inverse)
+                    cam_in_marker = np.linalg.inv(marker_in_cam)
+                    
+                    # Draw marker axis
+                    draw_axis(vis, K, rvec, tvec, axis_len, dist)
+                    
+                    # Extract camera position in marker frame for display
+                    cam_pos_in_marker = cam_in_marker[:3, 3]
 
-                # draw marker axis
-                draw_axis(vis, K, rvec, tvec, axis_len, dist)
+                    if best_pose is None or area > best_pose['area']:
+                        best_pose = {
+                            'id': int(marker_id),
+                            'area': area,
+                            'rvec': rvec,
+                            'tvec': tvec,
+                            'cam_in_marker': cam_in_marker,
+                            'marker_in_cam': marker_in_cam,
+                            'cam_pos_in_marker': cam_pos_in_marker,
+                        }
+                    
+                    # Now compute object pose using offsets
+                    # build object transform relative to marker using user offsets/rotations
+                    T_marker_from_obj = build_transform_from_euler_and_translation(
+                        rx, ry, rz, tx, ty, tz)
+                    t_obj_in_marker = T_marker_from_obj[:3, 3]  # object position in marker frame
 
-                # build object transform relative to marker using user offsets/rotations
-                T_marker_from_obj = build_transform_from_euler_and_translation(
-                    rx, ry, rz, tx, ty, tz)
+                    # Compute object in camera frame: ob_in_cam = marker_in_cam @ object_in_marker
+                    ob_in_cam = marker_in_cam @ T_marker_from_obj
+                    
+                    # Compute camera in object frame (inverse of object in camera)
+                    cam_in_obj = np.linalg.inv(ob_in_cam)
+                    
+                    cam_pos_in_obj = cam_in_obj[:3, 3]  # camera position in object frame (meters)
+                    cam_rot_in_obj = cam_in_obj[:3, :3]  # camera rotation in object frame
+                    cam_euler_in_obj = rotation_matrix_to_euler(cam_rot_in_obj)  # in degrees
 
-                # object in camera
-                ob_in_cam = T_cam_from_marker @ T_marker_from_obj
+                    # Update best_pose with object information
+                    if area == best_pose['area']:  # only update if this is the best marker
+                        best_pose['ob_in_cam'] = ob_in_cam
+                        best_pose['cam_in_obj'] = cam_in_obj
+                        best_pose['cam_pos_in_obj'] = cam_pos_in_obj
+                        best_pose['cam_euler_in_obj'] = cam_euler_in_obj
+                        best_pose['obj_pos_in_marker'] = t_obj_in_marker
+                    
+                    # draw object axes: origin and unit axes scaled by axis_len
+                    pts_obj = np.array([[0, 0, 0], [axis_len, 0, 0], [0, axis_len, 0], [0, 0, axis_len]])
+                    imgpts = project_points(K, ob_in_cam, pts_obj, dist)
+                    origin = tuple(imgpts[0])
+                    xpt = tuple(imgpts[1])
+                    ypt = tuple(imgpts[2])
+                    zpt = tuple(imgpts[3])
 
-                if best_pose is None or area > best_pose['area']:
-                    best_pose = {
-                        'id': int(marker_id),
-                        'area': area,
-                        'T_cam_from_marker': T_cam_from_marker,
-                        'ob_in_cam': ob_in_cam,
-                    }
+                    cv2.line(vis, origin, xpt, (0, 0, 255), 3)  # X - red
+                    cv2.line(vis, origin, ypt, (0, 255, 0), 3)  # Y - green
+                    cv2.line(vis, origin, zpt, (255, 0, 0), 3)  # Z - blue
 
-                # draw object axes: origin and unit axes scaled by axis_len
-                pts_obj = np.array([[0, 0, 0], [axis_len, 0, 0], [0, axis_len, 0], [0, 0, axis_len]])
-                imgpts = project_points(K, ob_in_cam, pts_obj, dist)
-                origin = tuple(imgpts[0])
-                xpt = tuple(imgpts[1])
-                ypt = tuple(imgpts[2])
-                zpt = tuple(imgpts[3])
+                    # overlay text with object offset/rotation and camera pose in object frame
+                    txt = f'id:{int(marker_id)} tx:{tx:.3f} ty:{ty:.3f} tz:{tz:.3f} rx:{rx:.1f} ry:{ry:.1f} rz:{rz:.1f}'
+                    cv2.putText(vis, txt, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                    
+                    # Display camera pose in object frame
+                    cam_pos_txt = f'Cam Pos (m): x={cam_pos_in_obj[0]:.4f} y={cam_pos_in_obj[1]:.4f} z={cam_pos_in_obj[2]:.4f}'
+                    cv2.putText(vis, cam_pos_txt, (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
+                    
+                    cam_rot_txt = f'Cam Rot (deg): rx={cam_euler_in_obj[0]:.1f} ry={cam_euler_in_obj[1]:.1f} rz={cam_euler_in_obj[2]:.1f}'
+                    cv2.putText(vis, cam_rot_txt, (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
 
-                cv2.line(vis, origin, xpt, (0, 0, 255), 3)  # X - red
-                cv2.line(vis, origin, ypt, (0, 255, 0), 3)  # Y - green
-                cv2.line(vis, origin, zpt, (255, 0, 0), 3)  # Z - blue
-
-                # overlay text
-                txt = f'id:{int(marker_id)} tx:{tx:.3f} ty:{ty:.3f} tz:{tz:.3f} rx:{rx:.1f} ry:{ry:.1f} rz:{rz:.1f}'
-                cv2.putText(vis, txt, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
-                help_txt = 'a/z x  e/r y  q/s z  d/f rx  w/x ry  c/v rz  c capture  q quit'
-                cv2.putText(vis, help_txt, (10, H - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                    help_txt = 'a/z x  e/r y  q/s z  d/f rx  w/x ry  c/v rz  space capture  esc quit'
+                    cv2.putText(vis, help_txt, (10, H - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                    
+                except Exception as e:
+                    print(f'Error processing marker {i}: {e}')
 
         else:
             cv2.putText(vis, 'No marker detected', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            help_txt = 'a/z x  e/r y  q/s z  d/f rx  w/x ry  c/v rz  c capture  q quit'
+            help_txt = 'a/z x  e/r y  q/s z  d/f rx  w/x ry  c/v rz  space capture  esc quit'
             cv2.putText(vis, help_txt, (10, H - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
         if best_pose is not None:
-            cv2.putText(vis, f'Using marker {best_pose["id"]} (best area)', (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
+            cv2.putText(vis, f'Using marker {best_pose["id"]} (best area)', (10, 95), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
+            
+            # Debug coordinates display
+            y_offset = 115
+            cam_marker_txt = f'Cam in Marker (m): x={best_pose["cam_pos_in_marker"][0]:.4f} y={best_pose["cam_pos_in_marker"][1]:.4f} z={best_pose["cam_pos_in_marker"][2]:.4f}'
+            cv2.putText(vis, cam_marker_txt, (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+            
+            obj_marker_txt = f'Obj in Marker (m): x={best_pose["obj_pos_in_marker"][0]:.4f} y={best_pose["obj_pos_in_marker"][1]:.4f} z={best_pose["obj_pos_in_marker"][2]:.4f}'
+            cv2.putText(vis, obj_marker_txt, (10, y_offset + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
 
         # Resize, optionally save, then visualize
         try:
@@ -300,26 +364,23 @@ def main():
 
         cv2.imshow('ArUco Object Pose', vis_resized)
         k = cv2.waitKey(1) & 0xFF
-        if k == 0x27 :
+        if k == 0x1b:
             break
         if k == ord(' '):
-            # capture: if marker present, save ob_in_cam matrix and print
+            # capture: if marker present, save cam_in_obj matrix and print
             if best_pose is None:
                 print('No marker to capture in this frame')
             else:
                 # use the best-area marker detected
-                T_cam_from_marker = best_pose['T_cam_from_marker']
-                T_marker_from_obj = build_transform_from_euler_and_translation(
-                    rx, ry, rz, tx, ty, tz)
-                ob_in_cam = T_cam_from_marker @ T_marker_from_obj
+                cam_in_obj = best_pose['cam_in_obj']
                 ts = int(time.time() * 1000)
-                fname = os.path.join(out_dir, f'ob_in_cam_{ts}.txt')
-                np.savetxt(fname, ob_in_cam.reshape(4, 4), fmt='%.18e')
+                fname = os.path.join(out_dir, f'cam_in_obj_{ts}.txt')
+                np.savetxt(fname, cam_in_obj.reshape(4, 4), fmt='%.18e')
                 print('Saved', fname)
                 print(f'Marker used: {best_pose["id"]}  area={best_pose["area"]:.1f} px^2')
-                print('ob_in_cam matrix:')
+                print('Camera in Object frame matrix:')
                 np.set_printoptions(precision=6, suppress=True)
-                print(ob_in_cam)
+                print(cam_in_obj)
 
         tx, ty, tz, rx, ry, rz = adjust_transform_from_key(k, tx, ty, tz, rx, ry, rz)
 

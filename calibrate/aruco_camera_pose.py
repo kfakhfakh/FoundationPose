@@ -78,7 +78,7 @@ def marker_area(corner):
 def main():
     parser = argparse.ArgumentParser(description='Detect ArUco marker and get camera pose relative to marker (RealSense only)')
     parser.add_argument('--cam', type=int, default=0, help='(ignored) Camera device index — RealSense required')
-    parser.add_argument('--marker-length', type=float, default=0.06, help='Marker side length in meters')
+    parser.add_argument('--marker-length', type=float, default=0.1, help='Marker side length in meters')
     parser.add_argument('--cam-k-file', type=str, default="C:\\Users\\kfakh\\OneDrive\\Desktop\\falku\\camera_calibration.npz", help='Optional camera intrinsics file (3x3 plain text)')
     parser.add_argument('--calib-file', type=str, default=None, help='Optional npz calibration file with camera_matrix and distortion_coefficients')
     parser.add_argument('--axis-length', type=float, default=0.05, help='Length of axes to draw (meters)')
