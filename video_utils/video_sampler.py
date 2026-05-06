@@ -8,7 +8,7 @@ import time
 # CONFIG
 # =========================
 BASE_FOLDER = "dataset"   # change this
-SAVE_FPS = 6              # frames per second to save
+SAVE_FPS = 15              # frames per second to save
 # =========================
 
 rgb_folder = os.path.join(BASE_FOLDER, "rgb")
@@ -22,8 +22,8 @@ pipeline = rs.pipeline()
 config = rs.config()
 
 # Enable streams
-config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+config.enable_stream(rs.stream.depth, 1280, 720, rs.format.z16, 30)
+config.enable_stream(rs.stream.color, 960, 540, rs.format.bgr8, 30)
 
 profile = pipeline.start(config)
 
@@ -50,8 +50,9 @@ try:
         color_image = np.asanyarray(color_frame.get_data())
         depth_image = np.asanyarray(depth_frame.get_data())  # uint16
 
-        # Visualization only (for display)
+        # Visualization only (for display): colorized depth map
         depth_display = cv2.convertScaleAbs(depth_image, alpha=0.03)
+        depth_display = cv2.applyColorMap(depth_display, cv2.COLORMAP_JET)
 
         # =========================
         # SAVE FRAMES (controlled FPS)
@@ -74,7 +75,7 @@ try:
 
         # Show (no overlays)
         cv2.imshow("RGB (aligned)", color_image)
-        cv2.imshow("Depth (visual)", depth_display)
+        cv2.imshow("Depth (visual, colorized)", depth_display)
 
         if cv2.waitKey(1) & 0xFF == 27:
             break

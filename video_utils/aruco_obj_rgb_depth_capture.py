@@ -181,6 +181,21 @@ def save_capture(output_root, capture_index, rgb_frame, depth_frame, cam_in_ob):
     return rgb_path, depth_path, matrix_path
 
 
+def build_preview(rgb_frame, depth_frame, preview_width=640):
+    rgb_preview = rgb_frame.copy()
+    depth_preview = cv2.convertScaleAbs(depth_frame, alpha=0.03)
+    depth_preview = cv2.applyColorMap(depth_preview, cv2.COLORMAP_TURBO)
+
+    if preview_width is not None and preview_width > 0:
+        h, w = rgb_preview.shape[:2]
+        preview_height = max(1, int(h * preview_width / w))
+        rgb_preview = cv2.resize(rgb_preview, (preview_width, preview_height), interpolation=cv2.INTER_AREA)
+        depth_preview = cv2.resize(depth_preview, (preview_width, preview_height), interpolation=cv2.INTER_AREA)
+
+    preview = np.hstack([rgb_preview, depth_preview])
+    return preview
+
+
 def main():
     parser = argparse.ArgumentParser(description='Capture aligned RGB, aligned depth, and camera-in-object pose from ArUco marker (RealSense only)')
     parser.add_argument('--cam', type=int, default=0, help='(ignored) Camera device index — RealSense required')
@@ -202,7 +217,7 @@ def main():
         raise RuntimeError('pyrealsense2 is not installed or could not be imported — RealSense is required')
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    output_root = args.output_root or os.path.join(script_dir, 'ref_views_1')
+    output_root = args.output_root or os.path.join(script_dir, 'ref_views_10')
     os.makedirs(output_root, exist_ok=True)
     rgb_dir, depth_dir, cam_in_ob_dir = ensure_output_dirs(output_root)
     capture_index = get_next_capture_index(output_root)
@@ -363,7 +378,9 @@ def main():
             rw, rh = vis.shape[1], vis.shape[0]
 
         vis_resized = cv2.resize(vis, (rw, rh))
+        preview = build_preview(rgb, depth, preview_width=max(320, rw // 2))
         cv2.imshow('ArUco RGB-D Capture', vis_resized)
+        cv2.imshow('RGB + Depth Preview', preview)
         k = cv2.waitKey(1) & 0xFF
 
         if k == 0x1b:
