@@ -79,7 +79,7 @@ class VideoFileReader:
 
   def get_mask(self, i):
     if self.mask_dir is None:
-      return np.ones((self.H, self.W), dtype=np.uint8)
+      return None
     frame_name = os.path.basename(self.id_strs[i])
     for ext in ['png', 'jpg', 'jpeg']:
       mask_path = os.path.join(self.mask_dir, f'{frame_name}.{ext}')
@@ -111,7 +111,7 @@ def make_video_writer(output_path, width, height, fps):
   return cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
 
-def load_frame(reader, i, need_mask=False):
+def load_frame(reader, i):
   if isinstance(reader, VideoFileReader):
     cap = cv2.VideoCapture(reader.video_file)
     cap.set(cv2.CAP_PROP_POS_FRAMES, i)
@@ -127,7 +127,11 @@ def load_frame(reader, i, need_mask=False):
     color = reader.get_color(i)
 
   depth = reader.get_depth(i)
-  mask = reader.get_mask(i) if need_mask else None
+  try:
+    mask = reader.get_mask(i)
+  except Exception as e:
+    logging.warning(f'Frame {i}: unable to load mask, continuing without mask. Error: {e}')
+    mask = None
   return {'color': color, 'depth': depth, 'mask': mask}
 
 
@@ -189,7 +193,7 @@ def inference_loop(reader, mesh, args):
     writer = None
 
   executor = ThreadPoolExecutor(max_workers=1)
-  next_future = executor.submit(load_frame, reader, 0, True)
+  next_future = executor.submit(load_frame, reader, 0)
 
   for i in range(len(reader)):
     logging.info(f'Frame {i+1}/{len(reader)}')
@@ -198,20 +202,34 @@ def inference_loop(reader, mesh, args):
 
     frame = next_future.result()
     if i + 1 < len(reader):
-      next_future = executor.submit(load_frame, reader, i + 1, False)
+      next_future = executor.submit(load_frame, reader, i + 1)
 
     color = frame['color']
     depth = frame['depth']
     if args.depth_scale != 1.0:
       depth = depth.astype(np.float32, copy=False) * args.depth_scale
 
-    if i == 0:
-      mask = frame['mask']
-      gpu_start = time.time()
-      pose = est.register(K=K, rgb=color, depth=depth, ob_mask=mask, iteration=args.est_refine_iter)
+    mask = frame['mask']
+    has_mask = (mask is not None) and np.any(mask)
+
+    gpu_start = time.time()
+    if args.inference_mode == 'frame_registration':
+      # Robust mode: re-register each frame when a mask is available.
+      if has_mask:
+        pose = est.register(K=K, rgb=color, depth=depth, ob_mask=mask, iteration=args.est_refine_iter)
+      elif i == 0 or est.pose_last is None:
+        # If no external mask is available on initialization, bootstrap with valid depth region.
+        init_mask = (depth >= 0.001).astype(np.uint8)
+        pose = est.register(K=K, rgb=color, depth=depth, ob_mask=init_mask, iteration=args.est_refine_iter)
+      else:
+        pose = est.track_one(rgb=color, depth=depth, K=K, iteration=args.track_refine_iter)
     else:
-      gpu_start = time.time()
-      pose = est.track_one(rgb=color, depth=depth, K=K, iteration=args.track_refine_iter)
+      # Fast mode: initialize once, then track.
+      if i == 0 or est.pose_last is None:
+        init_mask = mask if has_mask else (depth >= 0.001).astype(np.uint8)
+        pose = est.register(K=K, rgb=color, depth=depth, ob_mask=init_mask, iteration=args.est_refine_iter)
+      else:
+        pose = est.track_one(rgb=color, depth=depth, K=K, iteration=args.track_refine_iter)
 
     torch.cuda.synchronize()
     gpu_time = time.time() - gpu_start
@@ -266,8 +284,9 @@ if __name__ == '__main__':
   parser.add_argument('--depth_scale', type=float, default=1.0, help='Multiplier applied to depth values before inference')
   parser.add_argument('--est_refine_iter', type=int, default=5)
   parser.add_argument('--track_refine_iter', type=int, default=2)
+  parser.add_argument('--inference_mode', type=str, choices=['frame_registration', 'fast'], default='frame_registration', help='frame_registration: register each frame when mask exists (robust); fast: initialize once then track (faster)')
   parser.add_argument('--debug', type=int, default=1)
-  parser.add_argument('--debug_dir', type=str, default=f'{code_dir}/debug')
+  parser.add_argument('--debug_dir', type=str, default=f'{code_dir}/output/3D_CAD_assembly')
   parser.add_argument('--save_video', type=int, default=0, help='Save output visualization as mp4')
   parser.add_argument('--print_pose_info', type=int, default=0, help='Print translation and rotation info for each frame to terminal')
   parser.add_argument('--device', type=int, default=0, help='CUDA device id to use for inference')
