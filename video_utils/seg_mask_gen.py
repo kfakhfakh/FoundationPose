@@ -2,7 +2,7 @@ import os
 import cv2
 import numpy as np
 
-labels_dir =  r"C:\Users\kfakh\Downloads\maskss\labels\train"
+labels_dir =  os.path.expanduser("~/Downloads/hhhh/labels/train")
 output_dir = "masks"
 
 os.makedirs(output_dir, exist_ok=True)
