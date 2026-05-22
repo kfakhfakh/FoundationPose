@@ -284,7 +284,7 @@ if __name__ == '__main__':
   parser.add_argument('--depth_scale', type=float, default=1.0, help='Multiplier applied to depth values before inference')
   parser.add_argument('--est_refine_iter', type=int, default=5)
   parser.add_argument('--track_refine_iter', type=int, default=2)
-  parser.add_argument('--inference_mode', type=str, choices=['frame_registration', 'fast'], default='frame_registration', help='frame_registration: register each frame when mask exists (robust); fast: initialize once then track (faster)')
+  parser.add_argument('--inference_mode', type=str, choices=['frame_registration', 'fast'], default='fast', help='frame_registration: register each frame when mask exists (robust); fast: initialize once then track (faster)')
   parser.add_argument('--debug', type=int, default=1)
   parser.add_argument('--debug_dir', type=str, default=f'{code_dir}/output/3D_CAD_assembly')
   parser.add_argument('--save_video', type=int, default=0, help='Save output visualization as mp4')
