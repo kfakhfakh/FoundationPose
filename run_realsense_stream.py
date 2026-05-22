@@ -193,6 +193,8 @@ def main():
   )
 
   mesh = trimesh.load(args.mesh_file)
+  verify_mesh_texture(mesh, args.mesh_file)
+  
   if args.mesh_scale != 1.0:
     if not hasattr(mesh, 'apply_scale'):
       raise RuntimeError(f'Loaded mesh type does not support scaling: {type(mesh)}')
@@ -217,6 +219,7 @@ def main():
   frame_idx = 0
   frame_skip_count = 0
   frames_to_skip = 30
+  mask_consumed = False
   try:
     while True:
       torch.cuda.synchronize()
@@ -238,8 +241,15 @@ def main():
         depth = depth.astype(np.float32, copy=False) * args.depth_scale
 
       has_mask = (mask is not None) and np.any(mask)
-      if frame_idx == 0 or est.pose_last is None:
+      # Use provided mask only for the very first registration frame.
+      if frame_idx == 0:
         init_mask = mask if has_mask else (depth >= 0.001).astype(np.uint8)
+        pose = est.register(K=reader.K, rgb=color, depth=depth, ob_mask=init_mask, iteration=args.est_refine_iter)
+        if has_mask and getattr(reader, 'fixed_mask', None) is not None:
+          reader.fixed_mask = None
+      elif est.pose_last is None:
+        # Re-registration after tracking loss: do not use external mask, rely on depth
+        init_mask = (depth >= 0.001).astype(np.uint8)
         pose = est.register(K=reader.K, rgb=color, depth=depth, ob_mask=init_mask, iteration=args.est_refine_iter)
       else:
         pose = est.track_one(rgb=color, depth=depth, K=reader.K, iteration=args.track_refine_iter)
