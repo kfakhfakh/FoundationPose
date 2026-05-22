@@ -134,11 +134,33 @@ def extract_translation_and_rotation(pose_matrix):
   return translation, euler_angles
 
 
+def verify_mesh_texture(mesh, mesh_file):
+  """Log texture/color information for loaded mesh."""
+  logging.info(f"Mesh file: {mesh_file}")
+  
+  if isinstance(mesh.visual, trimesh.visual.texture.TextureVisuals):
+    logging.info("✓ TEXTURE LOADED: Mesh has texture (TextureVisuals)")
+    if hasattr(mesh.visual, 'material') and hasattr(mesh.visual.material, 'image'):
+      tex_size = mesh.visual.material.image.size
+      logging.info(f"  Texture size: {tex_size[0]}x{tex_size[1]} pixels")
+    if hasattr(mesh.visual, 'uv'):
+      logging.info(f"  UV coordinates: {mesh.visual.uv.shape[0]} vertices")
+  elif hasattr(mesh, 'visual') and mesh.visual.vertex_colors is not None:
+    logging.info("✓ VERTEX COLORS LOADED: Mesh has per-vertex colors")
+    logging.info(f"  Colored vertices: {mesh.visual.vertex_colors.shape[0]}")
+  else:
+    logging.warning("⚠ NO TEXTURE/COLORS: Mesh will render with default gray (128,128,128)")
+    logging.warning("  To use textures, ensure:")
+    logging.warning("    - Texture files (.png/.jpg) are in same directory as mesh")
+    logging.warning("    - .mtl file references correct texture filenames")
+    logging.warning("    - Format supports textures (.obj+.mtl, .glb, .gltf)")
+
+
 def main():
   parser = argparse.ArgumentParser(description='FoundationPose RealSense stream inference')
   code_dir = os.path.dirname(os.path.realpath(__file__))
   parser.add_argument('--mesh_file', type=str, default=f'{code_dir}/dataset/models/obj_01.PLY', help='Path to object mesh file (PLY or OBJ)')
-  parser.add_argument('--mesh_scale', type=float, default=1.0, help='Uniform scale factor applied to mesh geometry before inference')
+  parser.add_argument('--mesh_scale', type=float, default=0.001, help='Uniform scale factor applied to mesh geometry before inference')
   parser.add_argument('--cam_K_file', type=str, default=f'{code_dir}/dataset/cam_K.txt', help='Optional camera intrinsic matrix file override')
   parser.add_argument('--mask_file', type=str, default=None, help='Optional fixed mask file used for initialization')
   parser.add_argument('--rs_color_width', type=int, default=960)
@@ -150,8 +172,8 @@ def main():
   parser.add_argument('--shorter_side', type=int, default=None, help='Resize shorter side to this value')
   parser.add_argument('--zfar', type=float, default=np.inf, help='Depth far clipping plane')
   parser.add_argument('--depth_scale', type=float, default=1.0, help='Multiplier applied to depth values before inference')
-  parser.add_argument('--est_refine_iter', type=int, default=5)
-  parser.add_argument('--track_refine_iter', type=int, default=2)
+  parser.add_argument('--est_refine_iter', type=int, default=1)
+  parser.add_argument('--track_refine_iter', type=int, default=1)
   parser.add_argument('--show_depth', type=int, default=0, help='Display colorized depth map alongside inference')
   parser.add_argument('--debug', type=int, default=1)
   parser.add_argument('--debug_dir', type=str, default=f'{code_dir}/output/realsense_stream')
