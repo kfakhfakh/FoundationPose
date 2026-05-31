@@ -117,10 +117,11 @@ def make_mesh_tensors(mesh, device='cuda', max_tex_size=None):
     uv[:,1] = 1 - uv[:,1]
     mesh_tensors['uv']  = uv
   else:
-    if mesh.visual.vertex_colors is None:
+    vertex_colors = getattr(mesh.visual, 'vertex_colors', None)
+    if vertex_colors is None:
       logging.info(f"WARN: mesh doesn't have vertex_colors, assigning a pure color")
-      mesh.visual.vertex_colors = np.tile(np.array([128,128,128]).reshape(1,3), (len(mesh.vertices), 1))
-    mesh_tensors['vertex_color'] = torch.as_tensor(mesh.visual.vertex_colors[...,:3], device=device, dtype=torch.float)/255.0
+      vertex_colors = np.tile(np.array([128,128,128]).reshape(1,3), (len(mesh.vertices), 1))
+    mesh_tensors['vertex_color'] = torch.as_tensor(np.asarray(vertex_colors)[...,:3], device=device, dtype=torch.float)/255.0
 
   mesh_tensors.update({
     'pos': torch.tensor(mesh.vertices, device=device, dtype=torch.float),
@@ -466,7 +467,11 @@ def depth_to_vis(depth, zmin=None, zmax=None, mode='rgb', inverse=True):
   else:
     depth = depth.clip(zmin, zmax)
     invalid = (depth==zmin) | (depth==zmax)
-    vis = (depth-zmin)/(zmax-zmin)
+    denom = zmax-zmin
+    if abs(float(denom)) < 1e-8:
+      vis = np.zeros_like(depth, dtype=np.float32)
+    else:
+      vis = (depth-zmin)/denom
     vis[invalid] = 1
 
   if mode=='gray':
@@ -559,10 +564,19 @@ def random_direction():
 def compute_mesh_diameter(model_pts=None, mesh=None, n_sample=1000):
   from sklearn.decomposition import TruncatedSVD
   if mesh is not None:
-    u, s, vh = scipy.linalg.svd(mesh.vertices, full_matrices=False)
-    pts = u@s
-    diameter = np.linalg.norm(pts.max(axis=0)-pts.min(axis=0))
-    return float(diameter)
+    bounds = np.asarray(mesh.bounds, dtype=np.float64)
+    if bounds.shape == (2, 3) and np.isfinite(bounds).all():
+      diameter = np.linalg.norm(bounds[1] - bounds[0])
+      if diameter > 0:
+        return float(diameter)
+
+    vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    if len(vertices) == 0:
+      return 0.0
+    if len(vertices) == 1:
+      return 0.0
+    dists = np.linalg.norm(vertices[None] - vertices[:, None], axis=-1)
+    return float(dists.max())
 
   if n_sample is None:
     pts = model_pts

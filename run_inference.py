@@ -106,6 +106,29 @@ def load_camera_matrix(cam_K_file):
   return K
 
 
+def load_mesh_file(mesh_path):
+  mesh = trimesh.load(mesh_path, force='mesh', process=False)
+  if isinstance(mesh, trimesh.Scene):
+    geometries = [geometry for geometry in mesh.geometry.values()]
+    if len(geometries) == 0:
+      raise RuntimeError(f'Unable to load mesh geometry from {mesh_path}')
+    mesh = trimesh.util.concatenate(geometries)
+  return mesh
+
+
+def get_object_frame(mesh):
+  try:
+    return trimesh.bounds.oriented_bounds(mesh)
+  except Exception:
+    bounds = np.asarray(mesh.bounds, dtype=np.float64)
+    if bounds.shape != (2, 3) or not np.isfinite(bounds).all():
+      raise
+    to_origin = np.eye(4)
+    to_origin[:3, 3] = -bounds.mean(axis=0)
+    extents = bounds[1] - bounds[0]
+    return to_origin, extents
+
+
 def make_video_writer(output_path, width, height, fps):
   fourcc = cv2.VideoWriter_fourcc(*'mp4v')
   return cv2.VideoWriter(output_path, fourcc, fps, (width, height))
@@ -172,7 +195,7 @@ def extract_translation_and_rotation(pose_matrix):
 
 
 def inference_loop(reader, mesh, args):
-  to_origin, extents = trimesh.bounds.oriented_bounds(mesh)
+  to_origin, extents = get_object_frame(mesh)
   bbox = np.stack([-extents/2, extents/2], axis=0).reshape(2,3)
 
   scorer = ScorePredictor()
@@ -286,7 +309,7 @@ if __name__ == '__main__':
   parser.add_argument('--track_refine_iter', type=int, default=2)
   parser.add_argument('--inference_mode', type=str, choices=['frame_registration', 'fast'], default='fast', help='frame_registration: register each frame when mask exists (robust); fast: initialize once then track (faster)')
   parser.add_argument('--debug', type=int, default=1)
-  parser.add_argument('--debug_dir', type=str, default=f'{code_dir}/output/3D_CAD_assembly')
+  parser.add_argument('--debug_dir', type=str, default=f'{code_dir}/output/debug')
   parser.add_argument('--save_video', type=int, default=0, help='Save output visualization as mp4')
   parser.add_argument('--print_pose_info', type=int, default=0, help='Print translation and rotation info for each frame to terminal')
   parser.add_argument('--device', type=int, default=0, help='CUDA device id to use for inference')
@@ -316,7 +339,7 @@ if __name__ == '__main__':
     cam_K = load_camera_matrix(args.cam_K_file)
     reader = VideoFileReader(args.video_file, depth_dir=args.depth_dir, mask_dir=args.mask_dir, cam_K=cam_K, shorter_side=args.shorter_side, zfar=args.zfar)
 
-  mesh = trimesh.load(args.mesh_file)
+  mesh = load_mesh_file(args.mesh_file)
   if args.mesh_scale != 1.0:
     if not hasattr(mesh, 'apply_scale'):
       raise RuntimeError(f'Loaded mesh type does not support scaling: {type(mesh)}')

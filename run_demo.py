@@ -26,7 +26,12 @@ if __name__=='__main__':
   set_logging_format()
   set_seed(0)
 
-  mesh = trimesh.load(args.mesh_file)
+  mesh = trimesh.load(args.mesh_file, force='mesh', process=False)
+  if isinstance(mesh, trimesh.Scene):
+    geometries = [geometry for geometry in mesh.geometry.values()]
+    if len(geometries) == 0:
+      raise RuntimeError(f'Unable to load mesh geometry from {args.mesh_file}')
+    mesh = trimesh.util.concatenate(geometries)
 
   debug = args.debug
   debug_dir = args.debug_dir

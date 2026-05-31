@@ -116,6 +116,29 @@ def load_camera_matrix(cam_K_file):
   return np.loadtxt(cam_K_file).reshape(3, 3)
 
 
+def load_mesh_file(mesh_path):
+  mesh = trimesh.load(mesh_path, force='mesh', process=False)
+  if isinstance(mesh, trimesh.Scene):
+    geometries = [geometry for geometry in mesh.geometry.values()]
+    if len(geometries) == 0:
+      raise RuntimeError(f'Unable to load mesh geometry from {mesh_path}')
+    mesh = trimesh.util.concatenate(geometries)
+  return mesh
+
+
+def get_object_frame(mesh):
+  try:
+    return trimesh.bounds.oriented_bounds(mesh)
+  except Exception:
+    bounds = np.asarray(mesh.bounds, dtype=np.float64)
+    if bounds.shape != (2, 3) or not np.isfinite(bounds).all():
+      raise
+    to_origin = np.eye(4)
+    to_origin[:3, 3] = -bounds.mean(axis=0)
+    extents = bounds[1] - bounds[0]
+    return to_origin, extents
+
+
 def make_video_writer(output_path, width, height, fps):
   fourcc = cv2.VideoWriter_fourcc(*'mp4v')
   return cv2.VideoWriter(output_path, fourcc, fps, (width, height))
@@ -214,7 +237,7 @@ def main():
     mask_file=args.mask_file,
   )
 
-  mesh = trimesh.load(args.mesh_file)
+  mesh = load_mesh_file(args.mesh_file)
   verify_mesh_texture(mesh, args.mesh_file)
   
   if args.mesh_scale != 1.0:
@@ -222,7 +245,7 @@ def main():
       raise RuntimeError(f'Loaded mesh type does not support scaling: {type(mesh)}')
     mesh.apply_scale(args.mesh_scale)
 
-  to_origin, extents = trimesh.bounds.oriented_bounds(mesh)
+  to_origin, extents = get_object_frame(mesh)
   bbox = np.stack([-extents/2, extents/2], axis=0).reshape(2, 3)
 
   scorer = ScorePredictor()

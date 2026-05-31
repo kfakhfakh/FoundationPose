@@ -111,6 +111,19 @@ def load_mesh_file(mesh_path):
   return mesh
 
 
+def get_object_frame(mesh):
+  try:
+    return trimesh.bounds.oriented_bounds(mesh)
+  except Exception:
+    bounds = np.asarray(mesh.bounds, dtype=np.float64)
+    if bounds.shape != (2, 3) or not np.isfinite(bounds).all():
+      raise
+    to_origin = np.eye(4)
+    to_origin[:3, 3] = -bounds.mean(axis=0)
+    extents = bounds[1] - bounds[0]
+    return to_origin, extents
+
+
 def create_video_writer(output_path, width, height, fps):
   fourcc = cv2.VideoWriter_fourcc(*'mp4v')
   return cv2.VideoWriter(output_path, fourcc, fps, (width, height))
@@ -374,7 +387,7 @@ def load_object_meshes(reader, models_dir, mesh_scale):
       if not hasattr(mesh, 'apply_scale'):
         raise RuntimeError(f'Loaded mesh type does not support scaling: {type(mesh)}')
       mesh.apply_scale(mesh_scale)
-    to_origin, extents = trimesh.bounds.oriented_bounds(mesh)
+    to_origin, extents = get_object_frame(mesh)
     bbox = np.stack([-extents / 2.0, extents / 2.0], axis=0).reshape(2, 3)
     selected_objects.append({
       'name': object_name,
