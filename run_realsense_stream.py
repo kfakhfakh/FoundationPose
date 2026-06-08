@@ -183,7 +183,7 @@ def main():
   parser = argparse.ArgumentParser(description='FoundationPose RealSense stream inference')
   code_dir = os.path.dirname(os.path.realpath(__file__))
   parser.add_argument('--mesh_file', type=str, default=f'{code_dir}/dataset/models/obj_01.PLY', help='Path to object mesh file (PLY or OBJ)')
-  parser.add_argument('--mesh_scale', type=float, default=0.001, help='Uniform scale factor applied to mesh geometry before inference')
+  parser.add_argument('--mesh_scale', type=float, default=1, help='Uniform scale factor applied to mesh geometry before inference')
   parser.add_argument('--cam_K_file', type=str, default=f'{code_dir}/dataset/cam_K.txt', help='Optional camera intrinsic matrix file override')
   parser.add_argument('--mask_file', type=str, default=None, help='Optional fixed mask file used for initialization')
   parser.add_argument('--rs_color_width', type=int, default=960)

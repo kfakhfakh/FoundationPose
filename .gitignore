@@ -156,3 +156,24 @@ data/
 logs/
 !BundleTrack/XMem/inference/data
 run_used.yml
+# VSCode
+.vscode/
+
+# model checkpoints
+*.pth
+*.ckpt
+
+# archives
+*.tar
+*.zip
+
+# datasets
+data/
+weights/
+ref_views_*/
+output/*
+output
+.gitignrore
+dataset
+*.png
+*.npy
